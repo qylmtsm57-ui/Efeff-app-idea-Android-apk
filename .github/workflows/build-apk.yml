@@ -6,138 +6,368 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
+
+      # ==========================================
+      # 1. تحميل المشروع
+      # ==========================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
+      # ==========================================
+      # 2. Python
+      # ==========================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: "pip"
 
+
+      # ==========================================
+      # 3. تحديث pip
+      # ==========================================
       - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
 
-      - name: Install dependencies
+
+      # ==========================================
+      # 4. تثبيت المكتبات
+      # ==========================================
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
 
-      - name: Generate Flutter Android project
+
+      # ==========================================
+      # 5. التحقق من Flet
+      # ==========================================
+      - name: Check Flet
         run: |
+          python -m flet --version
+          python -m flet build --show-platform-matrix
+
+
+      # ==========================================
+      # 6. إنشاء مشروع Android الأولي
+      #
+      # نستخدم || true لأن الهدف من هذه المرحلة
+      # هو إنشاء build/flutter حتى نستطيع تعديله.
+      # ==========================================
+      - name: Generate Flet Android project
+        shell: bash
+        run: |
+          set +e
+
           flet build apk \
             --python-version 3.13 \
             --yes \
             --verbose \
-            --no-rich-output || true
+            --no-rich-output
 
-      - name: Patch Android desugaring
+          BUILD_EXIT=$?
+
+          echo "Initial Flet build exit code: $BUILD_EXIT"
+
+          if [ ! -d "build/flutter/android" ]; then
+            echo "ERROR: Flet did not generate the Android project."
+            exit 1
+          fi
+
+          echo "Android project generated successfully."
+
+
+      # ==========================================
+      # 7. إصلاح Android Gradle
+      #
+      # flutter_local_notifications يحتاج:
+      #
+      # isCoreLibraryDesugaringEnabled = true
+      #
+      # + desugar_jdk_libs
+      # ==========================================
+      - name: Patch Android Gradle configuration
+        shell: python
         run: |
-          python - <<'PY'
           from pathlib import Path
+          import re
+          import sys
 
-          gradle = Path("build/flutter/android/app/build.gradle.kts")
+          gradle = Path(
+              "build/flutter/android/app/build.gradle.kts"
+          )
 
           if not gradle.exists():
-              raise SystemExit(
-                  "ERROR: build/flutter/android/app/build.gradle.kts was not generated."
-              )
+              print("ERROR: build.gradle.kts not found:")
+              print(gradle)
+              sys.exit(1)
 
           text = gradle.read_text(encoding="utf-8")
 
-          # Enable core library desugaring
-          if "isCoreLibraryDesugaringEnabled = true" not in text:
-              marker = "compileOptions {"
+          print("\n===== ORIGINAL build.gradle.kts =====")
+          print(text)
 
-              if marker not in text:
-                  raise SystemExit(
-                      "ERROR: compileOptions block was not found."
-                  )
+          # ------------------------------------------
+          # 1. تفعيل Core Library Desugaring
+          # ------------------------------------------
 
-              text = text.replace(
-                  marker,
-                  marker + "\n        isCoreLibraryDesugaringEnabled = true",
-                  1,
+          if "isCoreLibraryDesugaringEnabled" not in text:
+
+              match = re.search(
+                  r"compileOptions\s*\{",
+                  text
               )
 
-          # Add desugar_jdk_libs dependency
-          dependency = (
+              if not match:
+                  print(
+                      "ERROR: compileOptions block was not found."
+                  )
+                  sys.exit(1)
+
+              insert_at = match.end()
+
+              text = (
+                  text[:insert_at]
+                  + "\n        isCoreLibraryDesugaringEnabled = true"
+                  + text[insert_at:]
+              )
+
+              print(
+                  "Added: isCoreLibraryDesugaringEnabled = true"
+              )
+
+          else:
+              print(
+                  "Desugaring is already enabled."
+              )
+
+
+          # ------------------------------------------
+          # 2. إضافة desugar_jdk_libs
+          # ------------------------------------------
+
+          desugar_dependency = (
               'coreLibraryDesugaring('
               '"com.android.tools:desugar_jdk_libs:2.1.4"'
               ')'
           )
 
-          if dependency not in text:
-              if "dependencies {" in text:
-                  text = text.replace(
-                      "dependencies {",
-                      "dependencies {\n    " + dependency,
-                      1,
+          if "desugar_jdk_libs" not in text:
+
+              dependencies_match = re.search(
+                  r"dependencies\s*\{",
+                  text
+              )
+
+              if dependencies_match:
+
+                  insert_at = dependencies_match.end()
+
+                  text = (
+                      text[:insert_at]
+                      + "\n    "
+                      + desugar_dependency
+                      + text[insert_at:]
                   )
+
               else:
+
                   text += (
                       "\n\n"
                       "dependencies {\n"
-                      f"    {dependency}\n"
+                      f"    {desugar_dependency}\n"
                       "}\n"
                   )
 
-          gradle.write_text(text, encoding="utf-8")
+              print(
+                  "Added desugar_jdk_libs dependency."
+              )
 
-          print("====================================")
-          print("Android Gradle desugaring patched")
-          print("====================================")
-          print(gradle.read_text(encoding="utf-8"))
+          else:
+              print(
+                  "desugar_jdk_libs already exists."
+              )
 
-          # Patch AndroidManifest for scheduled notifications
+
+          # ------------------------------------------
+          # 3. ضمان Java 17
+          # ------------------------------------------
+
+          if "sourceCompatibility = JavaVersion.VERSION_17" not in text:
+
+              compile_options = re.search(
+                  r"compileOptions\s*\{(.*?)\n\s*\}",
+                  text,
+                  re.DOTALL
+              )
+
+              if compile_options:
+
+                  block = compile_options.group(1)
+
+                  if "sourceCompatibility" not in block:
+                      block += (
+                          "\n"
+                          "        sourceCompatibility = "
+                          "JavaVersion.VERSION_17"
+                      )
+
+                  if "targetCompatibility" not in block:
+                      block += (
+                          "\n"
+                          "        targetCompatibility = "
+                          "JavaVersion.VERSION_17"
+                      )
+
+                  replacement = (
+                      "compileOptions {"
+                      + block
+                      + "\n    }"
+                  )
+
+                  text = text[
+                      :compile_options.start()
+                  ] + replacement + text[
+                      compile_options.end():]
+
+
+          gradle.write_text(
+              text,
+              encoding="utf-8"
+          )
+
+
+          print("\n===== PATCHED build.gradle.kts =====")
+          print(text)
+
+
+      # ==========================================
+      # 8. إصلاح AndroidManifest
+      # ==========================================
+      - name: Patch Android notification manifest
+        shell: python
+        run: |
+          from pathlib import Path
+          import sys
+
           manifest = Path(
               "build/flutter/android/app/src/main/AndroidManifest.xml"
           )
 
-          if manifest.exists():
-              m = manifest.read_text(encoding="utf-8")
+          if not manifest.exists():
+              print("WARNING: AndroidManifest.xml not found.")
+              sys.exit(0)
 
-              receivers = """
-              <receiver
-                  android:exported="false"
-                  android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+          text = manifest.read_text(
+              encoding="utf-8"
+          )
 
-              <receiver
-                  android:exported="false"
-                  android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
-                  <intent-filter>
-                      <action android:name="android.intent.action.BOOT_COMPLETED" />
-                      <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                      <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                      <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
-                  </intent-filter>
-              </receiver>
-              """
+          receivers = """
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
 
-              if "ScheduledNotificationReceiver" not in m:
-                  if "</application>" not in m:
-                      raise SystemExit(
-                          "ERROR: </application> not found in AndroidManifest.xml"
-                      )
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
-                  m = m.replace(
-                      "</application>",
-                      receivers + "\n</application>",
-                      1,
+        <receiver
+            android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
+          """
+
+          if "ScheduledNotificationReceiver" not in text:
+
+              if "</application>" not in text:
+                  print(
+                      "ERROR: </application> not found."
                   )
+                  sys.exit(1)
 
-                  manifest.write_text(m, encoding="utf-8")
+              text = text.replace(
+                  "</application>",
+                  receivers + "\n    </application>",
+                  1
+              )
 
-                  print("Android notification receivers added")
-              else:
-                  print("Notification receivers already exist")
+              manifest.write_text(
+                  text,
+                  encoding="utf-8"
+              )
+
+              print(
+                  "Notification receivers added."
+              )
+
           else:
-              print("WARNING: AndroidManifest.xml not found")
+              print(
+                  "Notification receivers already exist."
+              )
 
+
+      # ==========================================
+      # 9. التحقق من التعديلات
+      # ==========================================
+      - name: Verify Android configuration
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "Checking Gradle configuration"
+          echo "=========================================="
+
+          GRADLE_FILE="build/flutter/android/app/build.gradle.kts"
+
+          grep -n \
+            "isCoreLibraryDesugaringEnabled" \
+            "$GRADLE_FILE"
+
+          grep -n \
+            "desugar_jdk_libs" \
+            "$GRADLE_FILE"
+
+          echo ""
+          echo "=========================================="
+          echo "Checking Android Manifest"
+          echo "=========================================="
+
+          grep -n \
+            "ScheduledNotification" \
+            build/flutter/android/app/src/main/AndroidManifest.xml \
+            || true
+
+
+      # ==========================================
+      # 10. تنظيف Gradle
+      # ==========================================
+      - name: Clean Android build
+        working-directory: build/flutter
+        run: |
+          chmod +x android/gradlew
+          android/gradlew \
+            --stop \
+            || true
+
+
+      # ==========================================
+      # 11. البناء النهائي
+      # ==========================================
       - name: Build final Android APK
         run: |
           flet build apk \
@@ -146,18 +376,63 @@ jobs:
             --verbose \
             --no-rich-output
 
+
+      # ==========================================
+      # 12. البحث عن APK
+      # ==========================================
       - name: Find APK
+        shell: bash
         run: |
-          echo "===================================="
-          echo "APK FILES"
-          echo "===================================="
+          echo "=========================================="
+          echo "GENERATED APK FILES"
+          echo "=========================================="
 
-          find . -type f -name "*.apk" -print
+          find . \
+            -type f \
+            -name "*.apk" \
+            -print
 
+
+      # ==========================================
+      # 13. التحقق من وجود APK
+      # ==========================================
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK_COUNT=$(find build/apk -type f -name "*.apk" | wc -l)
+
+          echo "APK count: $APK_COUNT"
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK was generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully."
+
+
+      # ==========================================
+      # 14. رفع APK
+      # ==========================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: FreshStock-APK
+          name: FreshStock-Android-APK
           path: build/apk/*.apk
           if-no-files-found: error
-          
+
+
+      # ==========================================
+      # 15. عرض معلومات APK
+      # ==========================================
+      - name: APK information
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "FINAL APK"
+          echo "=========================================="
+
+          ls -lh build/apk/*.apk
+
+          echo ""
+          echo "Build completed successfully."
