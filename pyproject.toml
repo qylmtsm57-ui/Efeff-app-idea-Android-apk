@@ -1,0 +1,25 @@
+[project]
+name = "freshstock-flet"
+version = "1.0.0"
+description = "FreshStock - Android inventory and expiry management app built with Python and Flet"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "flet>=0.86.0,<0.90.0",
+  "flet-android-notifications>=0.10.0,<0.11.0"
+]
+
+[tool.flet]
+product = "FreshStock"
+company = "FreshStock"
+org = "com.freshstock"
+app_name = "freshstock"
+assets_dir = "assets"
+
+[tool.flet.android]
+min_sdk_version = 24
+split_per_abi = false
+
+[tool.flet.android.permission]
+"android.permission.POST_NOTIFICATIONS" = true
+"android.permission.SCHEDULE_EXACT_ALARM" = true
+"android.permission.RECEIVE_BOOT_COMPLETED" = true
