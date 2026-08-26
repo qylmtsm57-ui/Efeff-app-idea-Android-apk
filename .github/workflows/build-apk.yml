@@ -19,23 +19,29 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Flet
+      - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
+
+      - name: Install Flet
+        run: |
           pip install "flet>=0.86.0"
 
       - name: Build Android APK
         run: |
-          flet build apk --verbose --no-rich-output
+          flet build apk \
+            --yes \
+            --verbose \
+            --no-rich-output
 
       - name: Find APK
         run: |
-          find build -type f -name "*.apk" -print
+          echo "Searching for APK..."
+          find . -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: FreshStock-APK
-          path: |
-            build/**/*.apk
+          path: build/apk/*.apk
           if-no-files-found: error
