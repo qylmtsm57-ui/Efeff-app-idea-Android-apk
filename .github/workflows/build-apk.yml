@@ -17,26 +17,141 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
 
-      - name: Install Flet
+      - name: Install dependencies
         run: |
-          pip install "flet>=0.86.0"
+          pip install -r requirements.txt
 
-      - name: Build Android APK
+      - name: Generate Flutter Android project
         run: |
           flet build apk \
+            --python-version 3.13 \
+            --yes \
+            --verbose \
+            --no-rich-output || true
+
+      - name: Patch Android desugaring
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          gradle = Path("build/flutter/android/app/build.gradle.kts")
+
+          if not gradle.exists():
+              raise SystemExit(
+                  "ERROR: build/flutter/android/app/build.gradle.kts was not generated."
+              )
+
+          text = gradle.read_text(encoding="utf-8")
+
+          # Enable core library desugaring
+          if "isCoreLibraryDesugaringEnabled = true" not in text:
+              marker = "compileOptions {"
+
+              if marker not in text:
+                  raise SystemExit(
+                      "ERROR: compileOptions block was not found."
+                  )
+
+              text = text.replace(
+                  marker,
+                  marker + "\n        isCoreLibraryDesugaringEnabled = true",
+                  1,
+              )
+
+          # Add desugar_jdk_libs dependency
+          dependency = (
+              'coreLibraryDesugaring('
+              '"com.android.tools:desugar_jdk_libs:2.1.4"'
+              ')'
+          )
+
+          if dependency not in text:
+              if "dependencies {" in text:
+                  text = text.replace(
+                      "dependencies {",
+                      "dependencies {\n    " + dependency,
+                      1,
+                  )
+              else:
+                  text += (
+                      "\n\n"
+                      "dependencies {\n"
+                      f"    {dependency}\n"
+                      "}\n"
+                  )
+
+          gradle.write_text(text, encoding="utf-8")
+
+          print("====================================")
+          print("Android Gradle desugaring patched")
+          print("====================================")
+          print(gradle.read_text(encoding="utf-8"))
+
+          # Patch AndroidManifest for scheduled notifications
+          manifest = Path(
+              "build/flutter/android/app/src/main/AndroidManifest.xml"
+          )
+
+          if manifest.exists():
+              m = manifest.read_text(encoding="utf-8")
+
+              receivers = """
+              <receiver
+                  android:exported="false"
+                  android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+
+              <receiver
+                  android:exported="false"
+                  android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+                  <intent-filter>
+                      <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                      <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                  </intent-filter>
+              </receiver>
+              """
+
+              if "ScheduledNotificationReceiver" not in m:
+                  if "</application>" not in m:
+                      raise SystemExit(
+                          "ERROR: </application> not found in AndroidManifest.xml"
+                      )
+
+                  m = m.replace(
+                      "</application>",
+                      receivers + "\n</application>",
+                      1,
+                  )
+
+                  manifest.write_text(m, encoding="utf-8")
+
+                  print("Android notification receivers added")
+              else:
+                  print("Notification receivers already exist")
+          else:
+              print("WARNING: AndroidManifest.xml not found")
+
+      - name: Build final Android APK
+        run: |
+          flet build apk \
+            --python-version 3.13 \
             --yes \
             --verbose \
             --no-rich-output
 
       - name: Find APK
         run: |
-          echo "Searching for APK..."
+          echo "===================================="
+          echo "APK FILES"
+          echo "===================================="
+
           find . -type f -name "*.apk" -print
 
       - name: Upload APK
@@ -45,3 +160,4 @@ jobs:
           name: FreshStock-APK
           path: build/apk/*.apk
           if-no-files-found: error
+          
